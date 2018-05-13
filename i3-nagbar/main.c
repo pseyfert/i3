@@ -47,11 +47,15 @@
 
 static char *argv0 = NULL;
 
+enum command_type_t { COMMAND_REGULAR = 0,
+    COMMAND_I3 = 1 };
+
 typedef struct {
     i3String *label;
     char *action;
     int16_t x;
     uint16_t width;
+    enum command_type_t command_type;
 } button_t;
 
 static xcb_window_t win;
@@ -152,50 +156,56 @@ static void handle_button_release(xcb_connection_t *conn, xcb_button_release_eve
     if (!button)
         return;
 
-    /* We need to create a custom script containing our actual command
-     * since not every terminal emulator which is contained in
-     * i3-sensible-terminal supports -e with multiple arguments (and not
-     * all of them support -e with one quoted argument either).
-     *
-     * NB: The paths need to be unique, that is, don’t assume users close
-     * their nagbars at any point in time (and they still need to work).
-     * */
-    char *script_path = get_process_filename("nagbar-cmd");
+    if (COMMAND_REGULAR == button->command_type) {
+        /* We need to create a custom script containing our actual command
+         * since not every terminal emulator which is contained in
+         * i3-sensible-terminal supports -e with multiple arguments (and not
+         * all of them support -e with one quoted argument either).
+         *
+         * NB: The paths need to be unique, that is, don’t assume users close
+         * their nagbars at any point in time (and they still need to work).
+         * */
+        char *script_path = get_process_filename("nagbar-cmd");
 
-    int fd = open(script_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    if (fd == -1) {
-        warn("Could not create temporary script to store the nagbar command");
-        return;
+        int fd = open(script_path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        if (fd == -1) {
+            warn("Could not create temporary script to store the nagbar command");
+            return;
+        }
+        FILE *script = fdopen(fd, "w");
+        if (script == NULL) {
+            warn("Could not fdopen() temporary script to store the nagbar command");
+            return;
+        }
+        fprintf(script, "#!/bin/sh\nrm %s\n%s", script_path, button->action);
+        /* Also closes fd */
+        fclose(script);
+
+        char *link_path;
+        char *exe_path = get_exe_path(argv0);
+        sasprintf(&link_path, "%s.nagbar_cmd", script_path);
+        if (symlink(exe_path, link_path) == -1) {
+            err(EXIT_FAILURE, "Failed to symlink %s to %s", link_path, exe_path);
+        }
+
+        char *terminal_cmd;
+        sasprintf(&terminal_cmd, "i3-sensible-terminal -e %s", link_path);
+        printf("argv0 = %s\n", argv0);
+        printf("terminal_cmd = %s\n", terminal_cmd);
+
+        start_application(terminal_cmd);
+
+        free(link_path);
+        free(terminal_cmd);
+        free(script_path);
+        free(exe_path);
+
+        /* TODO: unset flag, re-render */
+    } else {
+        char *i3_cmd;
+        sasprintf(&i3_cmd, "i3-msg %s", button->action);
+        start_application(i3_cmd);
     }
-    FILE *script = fdopen(fd, "w");
-    if (script == NULL) {
-        warn("Could not fdopen() temporary script to store the nagbar command");
-        return;
-    }
-    fprintf(script, "#!/bin/sh\nrm %s\n%s", script_path, button->action);
-    /* Also closes fd */
-    fclose(script);
-
-    char *link_path;
-    char *exe_path = get_exe_path(argv0);
-    sasprintf(&link_path, "%s.nagbar_cmd", script_path);
-    if (symlink(exe_path, link_path) == -1) {
-        err(EXIT_FAILURE, "Failed to symlink %s to %s", link_path, exe_path);
-    }
-
-    char *terminal_cmd;
-    sasprintf(&terminal_cmd, "i3-sensible-terminal -e %s", link_path);
-    printf("argv0 = %s\n", argv0);
-    printf("terminal_cmd = %s\n", terminal_cmd);
-
-    start_application(terminal_cmd);
-
-    free(link_path);
-    free(terminal_cmd);
-    free(script_path);
-    free(exe_path);
-
-    /* TODO: unset flag, re-render */
 }
 
 /*
@@ -363,11 +373,12 @@ int main(int argc, char *argv[]) {
         {"type", required_argument, 0, 't'},
         {0, 0, 0, 0}};
 
-    char *options_string = "b:f:m:t:vh";
+    char *options_string = "b:i:f:m:t:vh";
 
     prompt = i3string_from_utf8("Please do not run this program.");
 
     while ((o = getopt_long(argc, argv, options_string, long_options, &option_index)) != -1) {
+        enum command_type_t command_type = COMMAND_REGULAR;
         switch (o) {
             case 'v':
                 printf("i3-nagbar " I3_VERSION "\n");
@@ -385,12 +396,17 @@ int main(int argc, char *argv[]) {
                 break;
             case 'h':
                 printf("i3-nagbar " I3_VERSION "\n");
-                printf("i3-nagbar [-m <message>] [-b <button> <action>] [-t warning|error] [-f <font>] [-v]\n");
+                printf("i3-nagbar [-m <message>] [-i <button> <action>]|[-b <button> <action>] [-t warning|error] [-f <font>] [-v]\n");
                 return 0;
+            case 'i':
+                command_type = COMMAND_I3;
+                //[[fallthrough]];
             case 'b':
+                printf("should see this\n");
                 buttons = srealloc(buttons, sizeof(button_t) * (buttoncnt + 1));
                 buttons[buttoncnt].label = i3string_from_utf8(optarg);
                 buttons[buttoncnt].action = argv[optind];
+                buttons[buttoncnt].command_type = command_type;
                 printf("button with label *%s* and action *%s*\n",
                        i3string_as_utf8(buttons[buttoncnt].label),
                        buttons[buttoncnt].action);
